@@ -1,0 +1,6 @@
+# PLACEHOLDER ONLY: replace with calibrated Bonn / camera intrinsics.
+# Do NOT use these example values for a scientific ATE evaluation.
+fx: 525.0
+fy: 525.0
+cx: 319.5
+cy: 239.5

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "predictive-motion-4dgs"
+version = "0.1.0"
+description = "Reference research pipeline for predictive motion-aware RGB-D Gaussian SLAM"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24,<3", "scipy>=1.10", "Pillow>=10", "PyYAML>=6", "tqdm>=4.66"]
+[project.optional-dependencies]
+render = ["torch>=2.1"]
+test = ["pytest>=7"]
+[project.scripts]
+predictive4d = "predictive4d.cli:main"
+[tool.setuptools.packages.find]
+where = ["src"]
