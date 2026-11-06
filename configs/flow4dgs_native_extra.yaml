@@ -1,0 +1,16 @@
+# This is a MERGE SNIPPET for the upstream Flow4DGS YAML, NOT a standalone config.
+# In the upstream config set model_params.flow_cam: false (the RAFT camera pose
+# branch would overwrite the neural camera prior). Keep native rendering on.
+# Set paths for your VS Code Remote/Colab/AutoDL Linux environment.
+predictive4d:
+  online: true
+  checkpoint: /content/checkpoints/official_camera_head.pt
+  model_config: /content/Predictive4D-Joint/configs/genflow_joint.yaml
+  packet_dir: /content/outputs/native_predictive_packets
+  device: cuda
+  seconds_per_frame: 0.10   # SET from your processed input timestamps/stride
+  native_joint_refine: true
+  max_gaussian_match_m: 0.15
+  min_dynamic_probability: 0.65
+  min_gaussian_matches: 12
+  max_gaussian_motion_m: 0.10

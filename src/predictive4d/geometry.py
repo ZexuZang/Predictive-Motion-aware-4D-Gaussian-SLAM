@@ -1,107 +1,85 @@
-"""SE(3), camera geometry, robust registration and optimization. Units: metres."""
-from __future__ import annotations
+"""World/camera SE(3) transforms and guarded rigid tracking."""
 import numpy as np
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 
-
-def skew(v):
-    x, y, z = np.asarray(v, dtype=float).reshape(3)
-    return np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]], dtype=float)
-
-
 def se3_exp(xi):
-    """SE3 left increment, xi=[translation(3), rotation vector(3)]."""
-    xi = np.asarray(xi, float).reshape(6)
-    v, w = xi[:3], xi[3:]
-    theta = float(np.linalg.norm(w)); W = skew(w)
-    if theta < 1e-8:
-        V = np.eye(3) + 0.5*W + (W @ W)/6
-    else:
-        V = (np.eye(3) + (1-np.cos(theta))/(theta**2)*W
-             + (theta-np.sin(theta))/(theta**3)*(W @ W))
-    T = np.eye(4); T[:3,:3] = Rotation.from_rotvec(w).as_matrix(); T[:3,3] = V @ v
+    xi=np.asarray(xi,float).reshape(6);v=xi[:3];w=xi[3:];th=np.linalg.norm(w)
+    W=np.array([[0,-w[2],w[1]],[w[2],0,-w[0]],[-w[1],w[0],0]])
+    if th<1e-7:V=np.eye(3)+.5*W+(W@W)/6
+    else:V=np.eye(3)+(1-np.cos(th))/th**2*W+(th-np.sin(th))/th**3*(W@W)
+    T=np.eye(4);T[:3,:3]=Rotation.from_rotvec(w).as_matrix();T[:3,3]=V@v
     return T
-
 
 def se3_log(T):
-    """SE3 log with stable numerical solve for V inverse."""
-    T=np.asarray(T, float); w=Rotation.from_matrix(T[:3,:3]).as_rotvec()
-    theta=np.linalg.norm(w); W=skew(w)
-    if theta < 1e-8: V=np.eye(3)+.5*W+(W@W)/6
-    else: V=np.eye(3)+(1-np.cos(theta))/theta**2*W+(theta-np.sin(theta))/theta**3*(W@W)
-    v=np.linalg.solve(V,T[:3,3])
-    return np.r_[v,w]
+    w=Rotation.from_matrix(T[:3,:3]).as_rotvec();th=np.linalg.norm(w)
+    W=np.array([[0,-w[2],w[1]],[w[2],0,-w[0]],[-w[1],w[0],0]])
+    V=np.eye(3)+.5*W+(W@W)/6 if th<1e-7 else np.eye(3)+(1-np.cos(th))/th**2*W+(th-np.sin(th))/th**3*(W@W)
+    return np.r_[np.linalg.solve(V,T[:3,3]),w]
 
+def invert(T):
+    R=T[:3,:3];T2=np.eye(4);T2[:3,:3]=R.T;T2[:3,3]=-R.T@T[:3,3]
+    return T2
 
-def inverse(T):
-    R=T[:3,:3]; q=np.eye(4);q[:3,:3]=R.T;q[:3,3]=-R.T@T[:3,3];return q
+def transform(T,points):
+    return np.asarray(points)@T[:3,:3].T+T[:3,3]
 
+def is_pose(T):
+    return bool(np.asarray(T).shape==(4,4) and np.isfinite(T).all()
+        and np.linalg.norm(T[:3,:3].T@T[:3,:3]-np.eye(3))<1e-4
+        and abs(np.linalg.det(T[:3,:3])-1)<1e-4)
 
-def transform(T, points):
-    pts=np.asarray(points,float)
-    return pts @ T[:3,:3].T + T[:3,3]
+def motion_size(T_new,T_old):
+    rel=T_new@invert(T_old)
+    return np.linalg.norm(rel[:3,3]),np.linalg.norm(Rotation.from_matrix(rel[:3,:3]).as_rotvec())
 
+def cap_pose(T_new,T_old,max_translation,max_rotation_deg):
+    if not is_pose(T_new):return T_old.copy(),False
+    relative=T_new@invert(T_old)
+    xi=se3_log(relative);t=np.linalg.norm(xi[:3]);r=np.linalg.norm(xi[3:]);bound=np.deg2rad(max_rotation_deg)
+    if t>max_translation or r>bound: return T_old.copy(),False
+    return T_new,True
 
-def unproject(depth, K, stride=1, max_points=2500, rng=None):
-    """Return sampled camera-space points and their (row,col) image coordinates."""
-    h,w=depth.shape; yy,xx=np.mgrid[0:h:stride,0:w:stride]
-    yy=yy.reshape(-1); xx=xx.reshape(-1); z=depth[yy,xx]
-    good=np.isfinite(z)&(z>0.1)&(z<30)
-    yy,xx,z=yy[good],xx[good],z[good]
-    if max_points and len(z)>max_points:
-        if rng is None: rng=np.random.default_rng(0)
-        ids=np.sort(rng.choice(len(z),size=max_points,replace=False)); yy,xx,z=yy[ids],xx[ids],z[ids]
-    X=(xx-K[0,2])*z/K[0,0];Y=(yy-K[1,2])*z/K[1,1]
-    return np.column_stack([X,Y,z]),np.column_stack([yy,xx]).astype(int)
+def unproject(frame,K,max_points=1600,pixel_stride=3,seed=42):
+    d=frame.depth;h,w=d.shape;ys,xs=np.mgrid[0:h:pixel_stride,0:w:pixel_stride]
+    yy,xx=ys.reshape(-1),xs.reshape(-1);z=d[yy,xx]
+    ok=np.isfinite(z)&(z>.15)&(z<12)
+    yy,xx,z=yy[ok],xx[ok],z[ok]
+    if len(z)>max_points:
+        ids=np.sort(np.random.default_rng(seed).choice(len(z),max_points,replace=False))
+        yy,xx,z=yy[ids],xx[ids],z[ids]
+    pts=np.column_stack([(xx-K[0,2])*z/K[0,0],(yy-K[1,2])*z/K[1,1],z]).astype(np.float64)
+    rgb=frame.rgb[yy,xx].astype(np.float32)/255.
+    mask=frame.dynamic_mask[yy,xx] if frame.dynamic_mask is not None else None
+    return pts,rgb,mask
 
+def nearest_unique(src,dst,max_dist=.25):
+    if not len(src) or not len(dst):return np.empty(0,int),np.empty(0,int),np.empty(0)
+    if not np.isfinite(src).all() or not np.isfinite(dst).all():raise ValueError("Nonfinite correspondence input")
+    tree=cKDTree(dst); d,j=tree.query(src,distance_upper_bound=max_dist)
+    ok=np.isfinite(d); ordered=np.flatnonzero(ok)[np.argsort(d[ok])]
+    used=set();ii=[];jj=[];dd=[]
+    for i in ordered:
+        if int(j[i]) in used:continue
+        used.add(int(j[i]));ii.append(i);jj.append(j[i]);dd.append(d[i])
+    return np.asarray(ii,int),np.asarray(jj,int),np.asarray(dd,float)
 
-def project(points_c,K):
-    pts=np.asarray(points_c,float);z=pts[:,2]
-    safe=np.where(z>1e-6,z,1e-6)
-    uv=np.column_stack([K[0,0]*pts[:,0]/safe+K[0,2],K[1,1]*pts[:,1]/safe+K[1,2]])
-    return uv,z>1e-6
-
-
-def weighted_rigid(src,dst,weights):
-    """World->camera weighted Umeyama/Kabsch *without scale*."""
-    src=np.asarray(src,float);dst=np.asarray(dst,float);w=np.asarray(weights,float).reshape(-1)
-    ok=np.isfinite(src).all(1)&np.isfinite(dst).all(1)&(w>1e-8)
-    if np.count_nonzero(ok)<3: raise ValueError('Not enough correspondences')
-    src,dst,w=src[ok],dst[ok],w[ok];w=w/w.sum()
-    a=(src*w[:,None]).sum(0);b=(dst*w[:,None]).sum(0)
-    C=((src-a)*w[:,None]).T@(dst-b)
-    U,s,Vt=np.linalg.svd(C);D=np.diag([1.,1.,np.sign(np.linalg.det(Vt.T@U.T))]);R=Vt.T@D@U.T
-    if s[1] < 1e-10:raise ValueError('Degenerate point geometry')
-    t=b-R@a;T=np.eye(4);T[:3,:3]=R;T[:3,3]=t
+def rigid_fit(world,observed,weights):
+    world=np.asarray(world,float);observed=np.asarray(observed,float);w=np.asarray(weights,float)
+    mask=(w>1e-8)&np.isfinite(world).all(axis=1)&np.isfinite(observed).all(axis=1)
+    if mask.sum()<6:raise ValueError("Insufficient matches")
+    a,b,w=world[mask],observed[mask],w[mask];w=w/w.sum()
+    am=(a*w[:,None]).sum(0);bm=(b*w[:,None]).sum(0)
+    H=((a-am)*w[:,None]).T@(b-bm);U,s,Vt=np.linalg.svd(H)
+    if s[1]<1e-8:raise ValueError("Degenerate geometry")
+    D=np.diag([1,1,np.sign(np.linalg.det(Vt.T@U.T))]);R=Vt.T@D@U.T
+    T=np.eye(4);T[:3,:3]=R;T[:3,3]=bm-R@am
     return T
 
-
-def pose_gn(T,src_world,obs_camera,weights,flow_world=None,iterations=4,prior=None,prior_strength=0.,damping=1e-5):
-    """Robust point-to-point SE3 GN, left perturbation. Prior is weak linearized 6D pose anchor."""
-    if len(src_world)<6:return T.copy()
-    T=T.copy();flow=np.zeros_like(src_world) if flow_world is None else np.asarray(flow_world)
-    src=np.asarray(src_world)+flow;dst=np.asarray(obs_camera)
-    base=np.asarray(weights,float).clip(0,1e5)
-    for _ in range(iterations):
-        p=transform(T,src);r=dst-p
-        mag=np.linalg.norm(r,axis=1); huber=np.minimum(1.,.08/np.maximum(mag,1e-8))
-        w=base*huber
-        J=np.zeros((len(p),3,6));J[:,:,:3]=-np.eye(3)
-        for i,pi in enumerate(p):J[i,:,3:]=skew(pi)
-        H=np.einsum('nij,nik,n->jk',J,J,w);g=np.einsum('nij,ni,n->j',J,r,w)
-        if prior is not None and prior_strength>0:
-            e=se3_log(T@inverse(prior));H+=prior_strength*np.eye(6);g+=prior_strength*e
-        H+=damping*np.eye(6)
-        try:delta=np.linalg.solve(H,-g)
-        except np.linalg.LinAlgError:break
-        step=np.linalg.norm(delta)
-        if step>0.5:delta*=.5/step
-        T=se3_exp(delta)@T
-        if step<1e-6:break
-    return T
-
-
-def predict_pose(trajectory):
-    """World->camera constant relative motion; valid without GT poses."""
-    if len(trajectory)<2:return np.array(trajectory[-1],copy=True)
-    return trajectory[-1]@inverse(trajectory[-2])@trajectory[-1]
+def match_hypotheses(T,prev_world,flow,dyn_prob,current,max_dist):
+    static=transform(T,prev_world);dynamic=transform(T,prev_world+flow)
+    # Select motion hypothesis using causal network probability, not current GT.
+    use_dyn=dyn_prob>0.5
+    predicted=np.where(use_dyn[:,None],dynamic,static)
+    i,j,d=nearest_unique(predicted,current,max_dist)
+    return i,j,d,use_dyn[i]

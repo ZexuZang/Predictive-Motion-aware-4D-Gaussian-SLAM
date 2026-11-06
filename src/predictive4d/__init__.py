@@ -1,5 +1,2 @@
-"""Predictive motion-aware 4D Gaussian SLAM research reference implementation.
-
-This is *not* a replacement for the official Flow4DGS CUDA rasterizer.
-"""
-__version__ = "0.1.0"
+"""Neural joint-prediction 4D Gaussian SLAM scaffold; research, not upstream Flow4DGS."""
+__version__ = "0.2.0"

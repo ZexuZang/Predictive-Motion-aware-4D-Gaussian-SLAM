@@ -1,0 +1,50 @@
+# NEURAL PIPELINE: checkpoint is REQUIRED for actual camera+scene network inference
+history_length: 3
+points_per_frame: 256
+hidden: 128
+device: auto
+max_points: 1600
+pixel_stride: 3
+seed: 42
+max_match_distance: 0.23
+min_static_matches: 25
+max_pose_translation_m: 0.30
+max_pose_rotation_deg: 18.0
+max_flow_m: 0.5
+min_dynamic_confidence: 0.75
+max_static_confidence: 0.65
+max_static_map: 1400
+max_dynamic_map: 700
+append_gaussians: 75
+keyframe_interval: 4
+feedback_enabled: true
+feedback_static_weak_below: 90
+feedback_max_dynamic_fraction: 0.30
+feedback_min_dynamic_matches: 8
+feedback_gate_sigma: 3.0
+feedback_max_translation_m: 0.12
+feedback_max_rotation_deg: 8.0
+feedback_static_degradation: 1.15
+snapshot_interval: 5
+preview_interval: 5
+preview_width: 320
+preview_height: 240
+export_official_packets: true
+# Torch-native differentiable low-res mapping (not official CUDA Flow4DGS)
+mapping_opt_steps: 1
+mapping_opt_interval: 4
+mapping_opt_width: 96
+mapping_opt_height: 72
+mapping_opt_max_static: 64
+mapping_opt_max_dynamic: 32
+
+# Final mathematical pipeline: probabilistic tri-hypothesis + local Schur SE3
+obs_std: 0.045
+outlier_prior: 0.06
+min_joint_matches: 24
+joint_outer_iterations: 4
+pose_prior_precision: 2.0
+weak_information_fraction: 0.08
+require_weak_static_direction: true
+# Important: variance from the neural head remains an uncalibrated proxy.
+uncertainty_calibrated: false

@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Train joint neural network (synthetic)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "predictive4d.cli",
+      "console": "integratedTerminal",
+      "args": ["train-synthetic", "--steps", "200", "--out", "checkpoints/joint_synthetic.pt"]
+    },
+    {
+      "name": "Run joint SLAM (local demo)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "predictive4d.cli",
+      "console": "integratedTerminal",
+      "args": [
+        "run", "--data", "data/demo_rgbd",
+        "--intrinsics", "data/demo_rgbd/intrinsics.yaml",
+        "--checkpoint", "checkpoints/joint_synthetic.pt",
+        "--config", "configs/joint.yaml",
+        "--frames", "8", "--out", "outputs/demo_joint"
+      ]
+    }
+  ]
+}
