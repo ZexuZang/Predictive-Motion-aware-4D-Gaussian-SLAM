@@ -97,6 +97,19 @@ Set `online: true`: after warm-up, the native frontend reads **only completed hi
 
 The current offset injection does **not** remove all remaining upstream RAFT operations, nor implement a full optimized native Gaussian rotation/scale prior. See `docs/FINAL_NOTION_ALIGNMENT.md`.
 
+## 4.1. Tracking and native integration safety fixes (2026-11-06)
+
+The repository now applies the following fail-closed behavior:
+
+- Ill-conditioned, singular or nonfinite local SE(3) solves **cannot** be relabeled `joint_ok` at the end of the optimizer. These frames do not update the map.
+- Per-frame motion posteriors cannot be downgraded by a weaker neural-only motion hint. A production probabilistic fusion model remains a research task.
+- A `tracking_lost` frame is output as a held pose but is **not inserted into world-anchored training/prediction history**; robust relocalization after prolonged loss is still unimplemented.
+- `uncertainty_calibrated: false` disables motion-prior contributions to camera pose (both Schur dynamic terms and dynamic Gaussian feedback). It still permits dynamic mapping hypotheses. Flip to `true` **only after** validating uncertainty calibration on independent data; setting the flag alone does not calibrate a model.
+- Native Flow4DGS `FrontEnd.cleanup()` must preserve sampled historical RGB-D point clouds before `Camera.clean()` removes depth and image; the patcher now inserts a cache hook in addition to the tracking and backend hooks.
+- Native Gaussian center offsets are composed across **all intermediate per-frame prediction packets** between keyframes, with time-order, motion, and correspondence gates. A missing intermediate packet causes native fallback rather than applying only the last-frame displacement.
+
+These issues have regression tests, but the actual official CUDA + native multiprocessing integration remains unverified. The native patcher must be re-applied to a clean upstream copy; existing one-hook patches should be carefully reviewed before adding new hooks.
+
 ## 5. Test and evaluation safeguards
 
 - All model-predicted world flow is in meters for the specified `dt`, not pixels or camera flow.

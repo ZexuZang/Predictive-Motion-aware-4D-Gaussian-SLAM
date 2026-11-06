@@ -32,7 +32,8 @@ def test_dynamic_feedback_can_adjust_camera():
     cfg={'feedback_enabled':True,'feedback_static_weak_below':90,
          'feedback_gate_sigma':3.,'feedback_min_dynamic_matches':8,
          'feedback_max_translation_m':.12,'feedback_max_rotation_deg':8.,
-         'feedback_static_degradation':1.15,'max_match_distance':.23}
+         'feedback_static_degradation':1.15,'max_match_distance':.23,
+         'uncertainty_calibrated':True}
     T,info=dynamic_pose_feedback(np.eye(4),np.eye(4),current,np.zeros((0,3)),np.array([],int),g,cfg)
     assert info['accepted'],info
     assert np.linalg.norm(T[:3,3]-Tgt[:3,3])<.025

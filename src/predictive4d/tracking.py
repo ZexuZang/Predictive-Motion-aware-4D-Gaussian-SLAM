@@ -118,6 +118,10 @@ def dynamic_pose_feedback(T,prev_T,current,static_world,static_used,prior_map,cf
     """
     diag={'status':'disabled','accepted':False,'dynamic_matches':0,'pose_delta_m':0.}
     if not cfg.get('feedback_enabled',True):return T,diag
+    # Log-variance heads and hand-tuned variances are not calibrated coverage.
+    # Fail closed until held-out calibration has been explicitly validated.
+    if not cfg.get('uncertainty_calibrated',False):
+        return T,{**diag,'status':'uncalibrated_motion_skipped'}
     if not len(prior_map.mean):return T,{**diag,'status':'no_dynamic_map'}
     Hstatic,static_information_matches=static_camera_information(T,static_world,current,float(cfg['max_match_distance']))
     diag['static_information_matches']=int(static_information_matches)

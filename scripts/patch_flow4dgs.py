@@ -10,6 +10,12 @@ closed on incompatible revisions. --apply writes only two upstream .py files.
 from pathlib import Path
 import argparse,ast,difflib
 
+CLEANUP_ANCHOR='        self.cameras[cur_frame_idx].clean()\n'
+CLEANUP_REPLACEMENT='''        # PREDICTIVE4D_HISTORY_CACHE: preserve geometry before native cleanup.
+        from predictive4d.flow4dgs_online import cache_completed_frame
+        cache_completed_frame(self, cur_frame_idx)
+        self.cameras[cur_frame_idx].clean()
+'''
 FRONTEND_ANCHOR='        viewpoint.update_RT(prev.R, prev.T)\n'
 FRONTEND_REPLACEMENT='''        viewpoint.update_RT(prev.R, prev.T)
         # PREDICTIVE4D_FRONTEND_HOOK (pretrained joint camera SE3 prior)
@@ -44,6 +50,7 @@ def main():
     a=p.parse_args()
     root=a.upstream
     pairs=[(root/'utils'/'slam_frontend.py',FRONTEND_ANCHOR,FRONTEND_REPLACEMENT),
+           (root/'utils'/'slam_frontend.py',CLEANUP_ANCHOR,CLEANUP_REPLACEMENT),
            (root/'utils'/'slam_backend.py',BACKEND_ANCHOR,BACKEND_REPLACEMENT)]
     # First validate all source files before ANY write.
     for f,anchor,replacement in pairs:patch_one(f,anchor,replacement,apply=False)

@@ -10,6 +10,7 @@ frame indices must not be confused with physical sensor timestamps.
 """
 from __future__ import annotations
 from pathlib import Path
+from collections import OrderedDict
 from types import SimpleNamespace
 import numpy as np
 import torch
@@ -42,6 +43,36 @@ def _native_T(camera):
     return T
 
 
+def cache_completed_frame(frontend, frame_index):
+    """Store sampled camera-space RGB-D BEFORE native Camera.clean() drops it.
+
+    Keep camera-space points (not world coordinates). At inference, native
+    optimized camera poses are read again, so backend BA updates are respected.
+    """
+    options=frontend.config.get('predictive4d',{})
+    if not options.get('online',False):return False
+    camera=frontend.cameras.get(frame_index)
+    if camera is None or camera.depth is None or camera.original_image is None:
+        return False
+    cache=getattr(frontend,'_predictive4d_frame_cache',None)
+    if cache is None:
+        cache=OrderedDict()
+        frontend._predictive4d_frame_cache=cache
+    if frame_index in cache:return True
+    model_yaml=options.get('model_config')
+    if not model_yaml:raise ValueError('predictive4d.model_config required for frame cache')
+    cfg=yaml.safe_load(Path(model_yaml).read_text(encoding='utf8'))
+    K=camera.intrinsic
+    K=K.detach().cpu().numpy() if isinstance(K,torch.Tensor) else np.asarray(K)
+    pc,rgb,_=unproject(_as_numpy_camera_frame(camera),K,int(cfg['max_points']),
+                        int(cfg['pixel_stride']),int(cfg['seed'])+int(frame_index))
+    if not len(pc):raise RuntimeError(f'Frame {frame_index}: no usable depth points to cache')
+    cache[int(frame_index)]=(pc.copy(),rgb.copy())
+    capacity=max(int(cfg['history_length'])+2,int(options.get('history_cache_frames',8)))
+    while len(cache)>capacity:cache.popitem(last=False)
+    return True
+
+
 class OnlineNeuralRuntime:
     def __init__(self,config):
         options=config.get('predictive4d',{})
@@ -68,9 +99,18 @@ class OnlineNeuralRuntime:
         history=[]
         for idx in keys:
             old=frontend.cameras[idx]
-            frame=_as_numpy_camera_frame(old)
-            pc,rgb,_=unproject(frame,K,int(self.cfg['max_points']),
-                                    int(self.cfg['pixel_stride']),int(self.cfg['seed'])+idx)
+            cache=getattr(frontend,'_predictive4d_frame_cache',{})
+            if idx in cache:
+                pc,rgb=cache[idx]
+            else:
+                if old.depth is None or old.original_image is None:
+                    raise RuntimeError(
+                        f'Historical frame {idx} has been cleaned without caching. '
+                        'Install the predictive4d FrontEnd.cleanup hook.'
+                    )
+                frame=_as_numpy_camera_frame(old)
+                pc,rgb,_=unproject(frame,K,int(self.cfg['max_points']),
+                                        int(self.cfg['pixel_stride']),int(self.cfg['seed'])+idx)
             if not len(pc):raise RuntimeError(f'No depth samples at native frame {idx}')
             T=_native_T(old)
             history.append(Past(transform(invert(T),pc),rgb,T,idx*self.dt,None))

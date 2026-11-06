@@ -35,7 +35,8 @@ def test_joint_pose_uses_valid_static_and_dynamic_observations():
     Tgt=se3_exp([.035,-.016,.015,.005,-.009,.003])
     Y=transform(Tgt,X+flow)+rng.normal(0,.002,(N,3))
     cfg={'max_match_distance':.15,'min_joint_matches':40,'joint_outer_iterations':5,
-         'max_pose_translation_m':.3,'max_pose_rotation_deg':12.,'pose_prior_precision':1.}
+         'max_pose_translation_m':.3,'max_pose_rotation_deg':12.,'pose_prior_precision':1.,
+         'uncertainty_calibrated':True}
     T,g,ids,diag=optimize_joint_pose(np.eye(4),np.eye(4),X,flow,p,
                                  np.ones((N,3))*.001,Y,cfg)
     assert diag['status']=='joint_ok',diag

@@ -5,7 +5,7 @@
 predictive4d:
   online: true
   checkpoint: /content/checkpoints/official_camera_head.pt
-  model_config: /content/Predictive4D-Joint/configs/genflow_joint.yaml
+  model_config: /content/Predictive-Motion-aware-4D-Gaussian-SLAM/configs/genflow_joint.yaml
   packet_dir: /content/outputs/native_predictive_packets
   device: cuda
   seconds_per_frame: 0.10   # SET from your processed input timestamps/stride
@@ -13,4 +13,6 @@ predictive4d:
   max_gaussian_match_m: 0.15
   min_dynamic_probability: 0.65
   min_gaussian_matches: 12
-  max_gaussian_motion_m: 0.10
+  max_gaussian_motion_m: 0.10  # per-frame bound; native adapter composes keyframe gap
+  max_prediction_gap_frames: 12  # refuse native substitution for larger gaps
+  history_cache_frames: 8      # keep completed RGB-D geometry before native cleanup

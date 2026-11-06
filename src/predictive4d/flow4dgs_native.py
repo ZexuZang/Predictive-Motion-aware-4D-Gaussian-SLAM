@@ -117,18 +117,39 @@ def apply_dynamic_packet(backend,frame_index,previous_keyframe_id):
     if xyz.ndim!=2 or xyz.shape[-1]!=3:raise RuntimeError('Unexpected native dynamic xyz layout')
     if len(xyz)==0:return False
     world_xyz=xyz.cpu().numpy()
-    offs,accepted=map_flow_to_official_gaussian_offsets(filename,world_xyz,
-        max_distance=float(backend.config.get('predictive4d',{}).get('max_gaussian_match_m',.15)),
-        min_dynamic_prob=float(backend.config.get('predictive4d',{}).get('min_dynamic_probability',.65)))
-    minimum=int(backend.config.get('predictive4d',{}).get('min_gaussian_matches',12))
+    settings=backend.config.get('predictive4d',{})
+    minimum=int(settings.get('min_gaussian_matches',12))
+    max_per_step=float(settings.get('max_gaussian_motion_m',.10))
+    max_steps=int(settings.get('max_prediction_gap_frames',12))
+    nsteps=int(frame_index)-int(previous_keyframe_id)
+    if nsteps<1 or nsteps>max_steps:return False
+    # Packet k represents k-1 -> k motion, NOT previous keyframe -> k.
+    # Sequentially evaluate flow at the propagated Gaussian coordinates.
+    positions=world_xyz.copy()
+    cumulative=np.zeros_like(world_xyz)
+    accepted=np.ones(len(world_xyz),dtype=bool)
+    last_timestamp=-float('inf')
+    for step in range(int(previous_keyframe_id)+1,int(frame_index)+1):
+        hit_step=_packet(backend.config,step)
+        if hit_step is None:return False   # never apply partial keyframe motion
+        step_file,step_packet=hit_step
+        timestamp=float(step_packet['timestamp'])
+        if not np.isfinite(timestamp) or timestamp<=last_timestamp:return False
+        last_timestamp=timestamp
+        offset,valid=map_flow_to_official_gaussian_offsets(
+            step_file,positions,
+            max_distance=float(settings.get('max_gaussian_match_m',.15)),
+            min_dynamic_prob=float(settings.get('min_dynamic_probability',.65)))
+        valid &= np.isfinite(offset).all(axis=1)
+        valid &= (np.linalg.norm(offset,axis=1)<max_per_step)
+        accepted &= valid
+        positions[valid]+=offset[valid]
+        cumulative[valid]+=offset[valid]
     if int(accepted.sum())<minimum:return False
-    maxmotion=float(backend.config.get('predictive4d',{}).get('max_gaussian_motion_m',.10))
-    accepted &= (np.linalg.norm(offs,axis=1)<maxmotion)
-    if int(accepted.sum())<minimum:return False
-    # Native update_delta_xyz creates a new per-keyframe nn.Parameter and copies
-    # previous offsets + selected predicted world displacements.
+    # Upstream enforces max_motion on the cumulative *keyframe* offset.
+    max_total=max_per_step*nsteps
     ids=torch.as_tensor(np.flatnonzero(accepted),dtype=torch.long,device=xyz.device)
-    values=torch.as_tensor(offs[accepted],dtype=xyz.dtype,device=xyz.device)
+    values=torch.as_tensor(cumulative[accepted],dtype=xyz.dtype,device=xyz.device)
     gs.update_delta_xyz(frame_index,previous_keyframe_id,values=values,
-                        idx=ids,max_motion=maxmotion)
+                        idx=ids,max_motion=max_total+1e-6)
     return True

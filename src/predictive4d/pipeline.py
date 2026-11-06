@@ -79,7 +79,9 @@ class RGBDPredictiveSLAM:
                 reliable_moving=(residual_static>.08)&(motion_advantage>.035)&(
                     np.linalg.norm(flow[ia],axis=1)>.05)&(d<.12)
                 evidence=np.where(reliable_moving,np.maximum(dyn_prob[ia],.82),dyn_prob[ia])
-                probs[ib]=np.clip(evidence,0,1)
+                # Never overwrite a stronger probabilistic motion posterior with
+                # a weaker network-only hint for the same current observation.
+                probs[ib]=np.maximum(probs[ib],np.clip(evidence,0,1))
             if mask is not None:probs[mask]=.99
             if tracked:self.mapper.integrate(world,rgb,probs,predicted_dynamic,ix)
             mapping_diag={'status':'not_keyframe'}
@@ -100,7 +102,10 @@ class RGBDPredictiveSLAM:
                     'static_gaussians':len(self.mapper.static),'dynamic_gaussians':len(self.mapper.dynamic)}
         if ix==0:world=camera.copy()
         self.poses.append(T.copy());self.timestamps.append(float(frame.timestamp))
-        self.history.append(Past(world.copy(),rgb.copy(),T.copy(),float(frame.timestamp),mask.copy() if mask is not None else None))
+        # A lost frame has no reliable world pose: keep the last trusted
+        # geometric history instead of contaminating future neural input.
+        if ix==0 or tracked:
+            self.history.append(Past(world.copy(),rgb.copy(),T.copy(),float(frame.timestamp),mask.copy() if mask is not None else None))
         rec=record
         rec['seconds_process']=float(time.perf_counter()-t0)
         self.records.append(rec)

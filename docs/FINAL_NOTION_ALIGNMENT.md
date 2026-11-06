@@ -50,3 +50,11 @@ Predicted flow is `V_world` in meters per *actual* frame interval.
 ## Experiments needed before paper-level claims
 
 Camera: ATE/RPE, lost-frame %, relocalization. Flow: EPE3D and fast motion/occlusion subsets. Mapping: dynamic PSNR/SSIM/LPIPS, depth and temporal consistency. Robustness: NIS, coverage, singular values of static information, false dynamic feedback, latency/FPS. Ablate: camera head, scene flow head, motion adapter, Schur dynamics, native Gaussian feedback, uncertainty gate, and full native rendering.
+
+
+## 2026-11-06 Safety audit notes
+
+- Dynamic camera factors are intentionally **disabled** while `uncertainty_calibrated: false`, including local Schur dynamic terms and Gaussian feedback. This is a safety gate, not evidence that neural uncertainty is calibrated. Recovering the intended dynamic-to-camera benefit requires independent calibration and ablation.
+- Failed solves remain marked failed, no longer overriding numerical errors with `joint_ok`.
+- Lost tracking does not update the trusted world-point history. This avoids poisoning future predictions, but **does not implement relocalization**.
+- Native temporal flow offsets now compose per-frame packets over the full keyframe gap. Native frontend point samples are cached before cleanup of non-keyframe RGB-D. CUDA integration tests remain pending.

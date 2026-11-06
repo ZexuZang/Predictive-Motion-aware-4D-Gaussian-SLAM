@@ -53,6 +53,9 @@ def optimize_joint_pose(T_prior,previous_T,X_world,V_world,p_dynamic,
     obsstd=float(cfg.get('obs_std',.045))
     iterations=int(cfg.get('joint_outer_iterations',4))
     minimum=int(cfg.get('min_joint_matches',24))
+    # An uncalibrated flow variance is not a trustworthy dynamic pose factor.
+    dynamic_pose_enabled=bool(cfg.get('uncertainty_calibrated',False))
+    out['dynamic_pose_enabled']=dynamic_pose_enabled
     # Associate once using the same pose prior. Avoid iterative drifting to
     # arbitrary nearest surfaces. Later outer iterations update posterior only.
     src_s=transform(T_prior,X_world)
@@ -64,6 +67,10 @@ def optimize_joint_pose(T_prior,previous_T,X_world,V_world,p_dynamic,
     X=X_world[i];V=V_world[i];Y=current_camera[j];P=p_dynamic[i];U=flow_variance[i]
     T=T_prior.copy();lam=float(cfg.get('pose_prior_precision',2.0))
     static_H=np.zeros((6,6));gamma=np.zeros((len(i),3))
+    if iterations < 1:
+        out['status']='no_iterations'
+        return T_prior.copy(),gamma,j,out
+    solver_failure=None
     for it in range(iterations):
         gamma,rs,rd=decompose(T,X,Y,V,P,U,observation_std=obsstd,
                        outlier_prior=float(cfg.get('outlier_prior',.06)))
@@ -78,7 +85,7 @@ def optimize_joint_pose(T_prior,previous_T,X_world,V_world,p_dynamic,
                 w/=1+(np.linalg.norm(rs[k])/.15)**2
                 hs=w*(J.T@J)
                 H+=hs;static_H+=hs;g+=w*J.T@rs[k]
-            if gamma[k,1]>1e-3:
+            if dynamic_pose_enabled and gamma[k,1]>1e-3:
                 hd,gd,_=schur_dynamic_factor(T,X[k],V[k],Y[k],U[k],obsstd)
                 w=float(gamma[k,1])/(1+(np.linalg.norm(rd[k])/.15)**2)
                 H+=w*hd;g+=w*gd
@@ -86,22 +93,31 @@ def optimize_joint_pose(T_prior,previous_T,X_world,V_world,p_dynamic,
         eig=np.linalg.eigvalsh(static_H)
         out['min_static_eigen']=float(eig[0])
         out['h_condition']=float(np.linalg.cond(H))
-        if not np.isfinite(H).all() or out['h_condition']>1e11:
-            out['status']='ill_conditioned';break
+        if not np.isfinite(H).all() or not np.isfinite(g).all() or not np.isfinite(out['h_condition']) or out['h_condition']>1e11:
+            solver_failure='ill_conditioned'
+            break
         try:delta=np.linalg.solve(H,-g)
         except np.linalg.LinAlgError:
-            out['status']='singular';break
-        if not np.isfinite(delta).all():out['status']='nonfinite_update';break
+            solver_failure='singular'
+            break
+        if not np.isfinite(delta).all():
+            solver_failure='nonfinite_update'
+            break
         # Guard individual GN steps; this does NOT conceal failed tracking.
         norm=float(np.linalg.norm(delta))
         if norm>.15:delta*=.15/norm
         if norm<1e-6:break
         T=se3_exp(delta)@T
+    # Preserve an actual solver failure: it must never be relabeled joint_ok.
+    if solver_failure is not None:
+        out['status']=solver_failure
+        return T_prior.copy(),gamma,j,out
     T,accepted=cap_pose(T,previous_T,
         float(cfg['max_pose_translation_m']),float(cfg['max_pose_rotation_deg']))
     out['static_mass']=float(gamma[:,0].sum())
     out['dynamic_mass']=float(gamma[:,1].sum())
     out['outlier_mass']=float(gamma[:,2].sum())
-    out['status']='joint_ok' if accepted and (out['static_mass']+out['dynamic_mass'])>=minimum*.45 else 'joint_rejected'
+    usable_mass=out['static_mass']+(out['dynamic_mass'] if dynamic_pose_enabled else 0.0)
+    out['status']='joint_ok' if accepted and usable_mass>=minimum*.45 else 'joint_rejected'
     if out['status']!='joint_ok':return T_prior.copy(),gamma,j,out
     return T,gamma,j,out
