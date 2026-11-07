@@ -124,3 +124,18 @@ These issues have regression tests, but the actual official CUDA + native multip
 Official GenFlow3D: https://github.com/ustc-hlli/GenFlow3D
 
 Official Flow4DGS-SLAM: https://github.com/wangys16/Flow4DGS-SLAM
+
+## Experimental learned camera fusion (optional; Nov 2026)
+
+A new **offline-supervised** scalar `ReliabilityFusionHead` can be trained to
+interpolate a neural camera proposal and either the neural-initialized joint
+BA proposal (`joint`) or a separate static geometry proposal (`independent`).
+The head predicts a *different* geometry weight from current-frame reliability
+features; the learned model parameters are fixed at test time. No GT is read
+during SLAM inference. Existing tracking behavior is unchanged by default.
+
+See [`docs/FUSION_HEAD_IMPLEMENTATION_CN.md`](docs/FUSION_HEAD_IMPLEMENTATION_CN.md)
+for `--export-fusion-candidates`, `train-fusion`, `eval-fusion`, and optional
+`--fusion-checkpoint` workflow. This is a **reference pipeline experiment**, not
+yet wired into native Flow4DGS CUDA. A successful synthetic smoke test does
+not establish accuracy on real dynamic RGB-D datasets.

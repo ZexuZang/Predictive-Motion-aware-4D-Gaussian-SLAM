@@ -33,8 +33,25 @@ def main():
     ru.add_argument('--depth-scale',type=float,default=5000.)
     ru.add_argument('--dynamic-mask-dir',default=None);ru.add_argument('--gt',default=None)
     ru.add_argument('--out',default='outputs/joint_run');ru.add_argument('--device',default='auto')
+    ru.add_argument('--export-fusion-candidates',action='store_true',
+                    help='Export candidate poses/features WITHOUT GT for later training')
+    ru.add_argument('--fusion-checkpoint',default=None,
+                    help='Optional frozen learned fusion head for experimental closed-loop run')
+    tf=sp.add_parser('train-fusion',help='Train lightweight fusion head on disjoint GT-labeled sequences')
+    tf.add_argument('--train-pair',nargs=2,action='append',required=True,
+                    metavar=('FUSION_CANDIDATES_NPZ','GT_TUM_TXT'))
+    tf.add_argument('--val-pair',nargs=2,action='append',required=True,
+                    metavar=('FUSION_CANDIDATES_NPZ','GT_TUM_TXT'))
+    tf.add_argument('--out',required=True);tf.add_argument('--epochs',type=int,default=150)
+    tf.add_argument('--geometry-source',choices=['joint','independent'],default='joint',
+                    help='joint=neural-initialized BA; independent=static geometry-only proposal')
+    ef=sp.add_parser('eval-fusion',help='Evaluate held-out camera fusion (offline, no GT in inference)')
+    ef.add_argument('--pair',nargs=2,action='append',required=True,
+                    metavar=('FUSION_CANDIDATES_NPZ','GT_TUM_TXT'))
+    ef.add_argument('--checkpoint',required=True)
     args=parser.parse_args()
-    device=('cuda' if torch.cuda.is_available() else 'cpu') if args.device=='auto' else args.device
+    requested_device=getattr(args,'device','auto')
+    device=('cuda' if torch.cuda.is_available() else 'cpu') if requested_device=='auto' else requested_device
     if args.command=='train-synthetic':
         path=train_synthetic(args.out,steps=args.steps,batch=args.batch,n=args.points,history=args.history,device=device)
         print('Trained neural checkpoint:',path);return
@@ -48,7 +65,18 @@ def main():
             device=device,eval_data=args.eval_data)
         print('Fine-tuned camera head saved:',path)
         return
+    if args.command=='train-fusion':
+        from .train_fusion import train_fusion
+        print(json.dumps(train_fusion(args.train_pair,args.val_pair,args.out,
+                                      epochs=args.epochs,geometry_source=args.geometry_source),indent=2))
+        return
+    if args.command=='eval-fusion':
+        from .train_fusion import evaluate_fusion
+        print(json.dumps(evaluate_fusion(args.checkpoint,args.pair),indent=2))
+        return
     cfg=yaml.safe_load(Path(args.config).read_text(encoding='utf8'))
+    if args.export_fusion_candidates:cfg['export_fusion_candidates']=True
+    if args.fusion_checkpoint:cfg['fusion_checkpoint']=args.fusion_checkpoint
     model,meta=load_model(args.checkpoint,device,config=cfg)
     if int(cfg['history_length'])!=int(meta['history']):
         raise ValueError('Checkpoint history length differs from config')

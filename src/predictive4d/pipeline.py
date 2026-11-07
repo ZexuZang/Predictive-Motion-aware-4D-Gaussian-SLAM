@@ -9,9 +9,10 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 from tqdm import tqdm
-from .geometry import unproject,invert,transform,is_pose,nearest_unique
-from .tracking import Past,NeuralPredictor,dynamic_pose_feedback
+from .geometry import unproject,invert,transform,is_pose,nearest_unique,cap_pose
+from .tracking import Past,NeuralPredictor,dynamic_pose_feedback,static_pose_correction
 from .joint_ba import optimize_joint_pose
+from .observability import static_camera_information
 from .gaussians import GaussianMapper,render_preview
 from .evaluate import evaluate_ate,write_trajectory
 from .official_bridge import export_frame_packet
@@ -23,6 +24,11 @@ class RGBDPredictiveSLAM:
         self.predictor=NeuralPredictor(network,cfg,device);self.mapper=GaussianMapper(cfg)
         self.history=deque(maxlen=max(5,int(cfg['history_length'])))
         self.poses=[];self.timestamps=[];self.records=[];self.frames_ok=0
+        self.fusion_samples=[]
+        self.fusion_runtime=None
+        if cfg.get('fusion_checkpoint'):
+            from .fusion_head import FusionRuntime
+            self.fusion_runtime=FusionRuntime(cfg['fusion_checkpoint'])
 
     def process(self,frame):
         ix=len(self.poses);t0=time.perf_counter()
@@ -56,10 +62,78 @@ class RGBDPredictiveSLAM:
                                     prev.xyz_world,flow,dyn_prob,flow_var)
             T,posteriors,used,track_diag=optimize_joint_pose(
                 T_prior,prev.T_cw,prev.xyz_world,flow,dyn_prob,flow_var,camera,self.cfg)
+            fusion_diag={'status':'off'}
+            if pose_source=='neural_shared_encoder' and (
+                    self.cfg.get('export_fusion_candidates',False) or self.fusion_runtime is not None):
+                # ALWAYS compute candidate features before a learned fusion update.
+                # The geometry branch in joint_ba was initialized with T_prior:
+                # it is NOT an independent geometry-only expert.
+                from .fusion_head import reliability_features, fuse_numpy
+                selected=transform(T,prev.xyz_world+np.where((dyn_prob>.5)[:,None],flow,0.))
+                _,_,dist=nearest_unique(selected,camera,float(self.cfg['max_match_distance']))
+                diagnostics={**track_diag,
+                             'median_residual_m':float(np.median(dist)) if len(dist) else 1.}
+                depth_ok=np.isfinite(frame.depth)&(frame.depth>.15)&(frame.depth<12)
+                features=reliability_features(T_prior,T,diagnostics,netdiag,flow,dyn_prob,
+                    len(camera),float(np.mean(depth_ok)))
+                # Separately compute a geometry-only alternative, without T_prior,
+                # neural flow or neural dynamic probabilities. It starts at the
+                # previous trusted camera pose (challenging under large motion).
+                external_mask = prev.dynamic_mask
+                independent_prior=np.full(len(prev.xyz_world),.05)
+                independent_T,ind_diag,_=static_pose_correction(
+                    prev.T_cw,prev.xyz_world,np.zeros_like(flow),independent_prior,
+                    camera,self.cfg,mask_previous=external_mask)
+                ind_valid=(ind_diag.get('status')=='tracking_ok')
+                static_world=(prev.xyz_world[~external_mask]
+                              if external_mask is not None else prev.xyz_world)
+                H_static,n_geo=static_camera_information(
+                    independent_T,static_world,camera,
+                    float(self.cfg['max_match_distance']),
+                    float(self.cfg.get('obs_std',.045)))
+                eigen=np.linalg.eigvalsh(H_static)
+                ind_model_diag={'matches':int(ind_diag.get('matched',0)),
+                                'static_mass':float(ind_diag.get('matched',0)),
+                                'dynamic_mass':0.,'outlier_mass':0.,
+                                'min_static_eigen':float(eigen[0]),
+                                'h_condition':float(np.linalg.cond(H_static+1e-6*np.eye(6))),
+                                'status':'joint_ok' if ind_valid else 'tracking_weak',
+                                'median_residual_m':float(ind_diag.get('median_residual_m',1.))}
+                independent_features=reliability_features(
+                    T_prior,independent_T,ind_model_diag,netdiag,flow,dyn_prob,
+                    len(camera),float(np.mean(depth_ok)))
+                if self.cfg.get('export_fusion_candidates',False):
+                    self.fusion_samples.append(dict(timestamp=float(frame.timestamp),
+                        T_pred=T_prior.copy(),T_geo=T.copy(),features=features.copy(),
+                        valid_geo=(track_diag['status']=='joint_ok'),
+                        T_geo_independent=independent_T.copy(),
+                        features_independent=independent_features.copy(),
+                        valid_geo_independent=ind_valid))
+                if self.fusion_runtime is not None:
+                    source=self.fusion_runtime.geometry_source
+                    chosen_T=(T if source=='joint' else independent_T)
+                    chosen_features=(features if source=='joint' else independent_features)
+                    chosen_valid=(track_diag['status']=='joint_ok' if source=='joint' else ind_valid)
+                    if chosen_valid:
+                        w=self.fusion_runtime.predict_weight(chosen_features)
+                        candidate=fuse_numpy(T_prior,chosen_T,w)
+                        candidate,accepted=cap_pose(candidate,prev.T_cw,
+                            float(self.cfg['max_pose_translation_m']),
+                            float(self.cfg['max_pose_rotation_deg']))
+                        if accepted:
+                            T=candidate
+                            fusion_diag={'status':'applied','source':source,'weight_geometry':w,
+                                         'weight_prediction':1.-w}
+                        else:
+                            fusion_diag={'status':'rejected_pose_jump','source':source,
+                                         'weight_geometry':w}
+                    else:
+                        fusion_diag={'status':'geometry_invalid_skipped','source':source}
             T2,feeddiag=dynamic_pose_feedback(T,prev.T_cw,camera,self.mapper.static.mean,used,predicted_dynamic,self.cfg)
             T=T2
             if not is_pose(T):raise FloatingPointError('Estimated transform is not SE3')
-            tracked=(track_diag['status']=='joint_ok' or feeddiag['accepted'])
+            tracked=(track_diag['status']=='joint_ok' or feeddiag['accepted']
+                     or fusion_diag.get('status')=='applied')
             # Keep a held pose on loss; DO NOT integrate an uncertain frame into map.
             if not tracked:T=prev.T_cw.copy();pose_source='held_pose_tracking_lost'
             else:self.frames_ok+=1
@@ -98,7 +172,7 @@ class RGBDPredictiveSLAM:
                     'feedback_status':feeddiag['status'],'feedback_accepted':bool(feeddiag['accepted']),
                     'feedback_dynamic_matches':int(feeddiag['dynamic_matches']),
                     'dynamic_ratio':float((probs>.6).mean()),
-                    'prediction':netdiag,'tracking':track_diag,'mapping':mapping_diag,
+                    'prediction':netdiag,'tracking':track_diag,'fusion':fusion_diag,'mapping':mapping_diag,
                     'static_gaussians':len(self.mapper.static),'dynamic_gaussians':len(self.mapper.dynamic)}
         if ix==0:world=camera.copy()
         self.poses.append(T.copy());self.timestamps.append(float(frame.timestamp))
@@ -122,6 +196,20 @@ class RGBDPredictiveSLAM:
             rec=self.process(frame)
             tqdm.write(f"frame={rec['frame']:03d} {rec['status']} matches={rec['matched']} "
                 f"dyn={rec['dynamic_ratio']:.3f} feedback={rec['feedback_status']}")
+        if self.cfg.get('export_fusion_candidates',False) and self.fusion_samples:
+            # No GT is read or written into this training-candidate file.
+            samples=self.fusion_samples
+            np.savez_compressed(self.out/'fusion_candidates.npz',
+                timestamps=np.asarray([s['timestamp'] for s in samples]),
+                origin_timestamp=np.asarray(self.timestamps[0]),
+                T_pred=np.stack([s['T_pred'] for s in samples]),
+                T_geo=np.stack([s['T_geo'] for s in samples]),
+                features=np.stack([s['features'] for s in samples]),
+                valid_geo=np.asarray([s['valid_geo'] for s in samples],dtype=bool),
+                T_geo_independent=np.stack([s['T_geo_independent'] for s in samples]),
+                features_independent=np.stack([s['features_independent'] for s in samples]),
+                valid_geo_independent=np.asarray(
+                    [s['valid_geo_independent'] for s in samples],dtype=bool))
         write_trajectory(self.out/'trajectory_est.tum',self.timestamps,self.poses)
         np.savez_compressed(self.out/'camera_poses.npz',T_cw=np.stack(self.poses),timestamps=np.asarray(self.timestamps))
         eva=evaluate_ate(self.timestamps,self.poses,gt_path) if gt_path else {'status':'no_gt'}
