@@ -1,379 +1,285 @@
 # Predictive Motion-aware 4D Gaussian SLAM
 
-**CV+GRU Camera Trajectory Prediction and GenFlow3D-guided Dynamic 4D Gaussian Reconstruction**
+**Native Flow4DGS-SLAM integration with CV+GRU camera-motion prediction and GenFlow3D scene-flow forecasting**
 
-A research framework extending [Flow4DGS-SLAM](https://github.com/wangys16/Flow4DGS-SLAM) with learned camera-motion prediction and multi-frame scene-flow forecasting for dynamic RGB-D reconstruction.
-
-**Status:** Research prototype with a completed 194-frame native SLAM experiment. Further ablations and independent validation are ongoing.
-
----
+> **Research prototype — not yet a fully validated, general-purpose 4D SLAM system.** This repository includes a completed native Bonn experiment and reproducibility scripts, alongside additional reference research modules that are not all enabled in the native experiment.
 
 ## 1. Overview
 
-This project explores the integration of two predictive components into a native 4D Gaussian SLAM system:
+![Predictive Motion-aware 4D Gaussian SLAM method overview](assets/overview.png)
 
-1. **CV+GRU Camera Trajectory Estimation:** Predicts the next camera pose using a constant-velocity SE(3) prior corrected by a learned acceleration GRU.
-2. **GenFlow3D Dynamic Motion Prediction:** Uses historical 3D point clouds to predict scene motion and propagate dynamic Gaussian centers.
+*Figure 1. Predictive Motion-aware 4D Gaussian SLAM overview. The CV+GRU branch forecasts a camera pose prior, while GenFlow3D predicts point-level scene flow that is transferred to native dynamic Gaussian centers via guarded correspondence. The original Flow4DGS tracker, mapper, and RAFT fallback are retained.*
 
-The system retains the original Flow4DGS-SLAM tracking, Gaussian mapping, and differentiable rendering backend.
 
-### Overall Pipeline
+The project extends [Flow4DGS-SLAM](https://github.com/wangys16/Flow4DGS-SLAM) with two predictive components:
 
-```text
-                 Historical RGB-D Frames
-                           |
-              Historical Camera Poses
-                           |
-              +------------+------------+
-              |                         |
-       Camera Motion History     Multi-frame Point Clouds
-              |                         |
-     Constant Velocity (CV)          GenFlow3D
-              |                   (BDCB / STIB)
-         GRU Acceleration                |
-              |                  Scene Flow Forecast
-              |                         |
-       Predicted Camera Pose       Dynamic Point Motion
-              |                         |
-              |                  Gaussian Correspondence
-              |                         |
-              |                  Gaussian Center Offsets
-              |                         |
-              +------------+------------+
-                           |
-                 Native Flow4DGS-SLAM
-                           |
-              Tracking + 4D Gaussian Mapping
-                           |
-                   Dynamic 4D Reconstruction
-```
+1. **CV+GRU camera trajectory prior.** A constant-velocity (CV) SE(3) extrapolation is corrected by a trained GRU predicting gated 6-DoF acceleration. The GRU uses **six completed historical camera poses**, their relative motion and real timestamps; it does not use target-frame ground truth.
+2. **GenFlow3D-guided dynamic Gaussian motion.** The official [GenFlow3D](https://github.com/ustc-hlli/GenFlow3D) network forecasts point-level 3D Scene Flow from previous world-space RGB-D point clouds. An adapter matches the forecast to **existing native dynamic Gaussians** and proposes updates to their keyframe center offsets (`_delta_xyz`). If matching or safety checks fail, the original Flow4DGS optical-flow propagation remains the fallback.
 
-## 2. Core Components
+Native Flow4DGS retains its Gaussian rasterizer, keyframe mapping, temporal representations and rendering evaluation. **GenFlow3D is not trained to directly output Gaussian centers in this implementation**: predicted Scene Flow is transferred to Gaussian centers via a correspondence adapter.
 
-### 2.1 CV+GRU Camera Trajectory Estimation
-
-The camera module combines constant-velocity extrapolation with a learned acceleration correction.
-
-The constant-velocity prediction is:
-
-\[
-T_t^{CV}
-=
-\operatorname{Exp}
-\left(
-\frac{\Delta t}{\Delta t_{t-1}}
-\operatorname{Log}(T_{t-1}T_{t-2}^{-1})
-\right)T_{t-1}
-\]
-
-A GRU learns an effective 6-DoF acceleration correction from the historical camera motion:
-
-\[
-\hat{\mathbf a}_t =
-f_{\mathrm{GRU}}(\mathcal H_{t-1})
-\]
-
-The final camera prior is:
-
-\[
-\hat T_t =
-\operatorname{Exp}
-\left(\frac{1}{2}\Delta t^2
-G(\hat{\mathbf a}_t)\right)
-T_t^{CV}
-\]
-
-where \(G\) applies the acceleration gates.
-
-**Implementation:**
-
-- `src/predictive4d/cv_acceleration.py`
-- `src/predictive4d/native_pose_compat.py`
-- `src/predictive4d/paper_native.py`
-
-The current model uses six historical camera poses, a 13-dimensional motion-feature representation, and a trained `CVAccelerationGRU-v1` checkpoint.
-
-The camera prior is causal: it does not use future RGB-D frames or evaluation ground-truth poses.
-
-### 2.2 GenFlow3D-guided Dynamic Motion Prediction
-
-Instead of relying exclusively on optical flow and depth-based motion propagation, the proposed system incorporates the official GenFlow3D network.
-
-GenFlow3D processes historical point clouds and estimates future 3D point motion.
-
-For a historical point \(\mathbf X_{i,t-1}\):
-
-\[
-\hat{\mathbf X}_{i,t}
-=
-\mathbf X_{i,t-1}
-+
-\hat{\mathbf V}_{i,t}
-\]
-
-The predicted point motion is subsequently transferred to native dynamic Gaussians through a correspondence adapter:
-
-\[
-\boldsymbol\mu_{i,t}
-=
-\boldsymbol\mu_{i,t-1}
-+
-\Delta\boldsymbol\mu_{i,t}
-\]
-
-**Implementation:**
-
-- `src/predictive4d/paper_native.py`
-- `src/predictive4d/flow4dgs_native.py`
-- `src/predictive4d/official_bridge.py`
-
-The model uses the official GenFlow3D implementation, including its temporal modeling architecture.
-
-**Important:** GenFlow3D currently predicts point-level Scene Flow. Gaussian center updates are produced by mapping this Scene Flow onto existing dynamic Gaussians; the network has not been retrained to directly output Gaussian parameters.
-
-### 2.3 Dynamic Mask Generation
-
-The completed native experiment uses the original Flow4DGS motion segmentation pathway:
-
-- YOLO-based object segmentation.
-- RAFT optical flow.
-- Depth-based rigid motion estimation.
-- Optical-flow residual segmentation.
-
-The resulting dynamic mask is used for dynamic point selection and Gaussian motion updates.
-
-An independent **GenFlow3D-guided probabilistic motion mask**, together with optional Pre-Ours mask fusion, is a planned extension rather than a validated feature of the completed experiment.
-
-### 2.4 Native 4D Gaussian Reconstruction
-
-The original Flow4DGS backend is preserved for:
-
-- Camera tracking and rendering-based pose refinement.
-- Static and dynamic Gaussian mapping.
-- Keyframe-based dynamic Gaussian center offsets.
-- Time-dependent Gaussian representation.
-- Native differentiable rendering and evaluation.
-
-Predicted motion is applied when the required correspondences and validity checks succeed. Otherwise, the original RAFT-based propagation remains available as fallback.
-
-## 3. Repository Structure
+### Current native pipeline
 
 ```text
-Predictive-Motion-aware-4D-Gaussian-SLAM/
-|
-+-- configs/
-|   +-- joint.yaml
-|   +-- genflow_joint.yaml
-|   +-- flow4dgs_native_extra.yaml
-|
-+-- src/predictive4d/
-|   +-- cv_acceleration.py
-|   +-- paper_native.py
-|   +-- native_pose_compat.py
-|   +-- flow4dgs_native.py
-|   +-- flow4dgs_online.py
-|   +-- official_bridge.py
-|   +-- genflow_shared.py
-|   +-- probabilistic.py
-|   +-- joint_ba.py
-|   +-- tracking.py
-|   +-- fusion_head.py
-|   +-- gaussians.py
-|   +-- pipeline.py
-|   +-- network.py
-|   +-- torch_renderer.py
-|
-+-- scripts/
-|   +-- setup_native_environment.py
-|   +-- patch_flow4dgs.py
-|   +-- patch_native_compat.py
-|   +-- prepare_genflow3d_imports.py
-|   +-- build_bonn_native_config.py
-|   +-- audit_native_run.py
-|
-+-- tests/
-+-- docs/
-+-- README.md
-+-- pyproject.toml
+Historical RGB-D frames + completed estimated camera poses
+                       |
+        +--------------+----------------+
+        |                               |
+  Camera history (6)             RGB-D point clouds (3)
+        |                               |
+  SE(3) Constant Velocity        Official GenFlow3D
+        + GRU acceleration         (BDCB/STIB architecture)
+        |                               |
+   Predicted T_cw(t)               Predicted 3D Scene Flow
+        |                               |
+        v                               v
+  Native camera prior           Point-to-Gaussian matching
+        |                               |
+  Flow4DGS static tracking      Accepted dynamic center offsets
+        |                               |
+        +---------------+---------------+
+                        |
+        Native Flow4DGS keyframes + 4D Gaussian mapping
+                        |
+             Rendering, trajectory and metrics
 ```
 
-## 4. Installation
+**Dynamic masks in the completed experiment:** the initial static/dynamic regions originate from the **native Flow4DGS YOLO segmentation and RAFT/depth rigid-motion residual**, not from a standalone GenFlow3D segmentation head or the separate Pre-Ours pipeline. Native `motion_mask` uses `True` for pixels permitted for static tracking; it is inverted where a dynamic mask is required. An optional Pre-Ours fusion and the planned probabilistic GenFlow3D motion-consistency mask are **future work**, not validated modules in this experiment.
 
-### 4.1 Local Development
+## Camera and Dynamic Motion Formulation
 
-Tested development workflow for VS Code and Python:
+### CV+GRU Camera Trajectory Estimation
+
+Using historical estimated camera poses (world-to-camera, `T_cw`) and measured frame timestamps, the constant-velocity camera prior is
+
+$$
+T_t^{\mathrm{CV}} =
+\operatorname{Exp}\!\left(
+\frac{\Delta t_t}{\Delta t_{t-1}}
+\operatorname{Log}\!\left(T_{t-1}T_{t-2}^{-1}\right)
+\right)T_{t-1}.
+$$
+
+Here, `Exp` and `Log` are the SE(3) exponential and logarithm maps. A GRU estimates an effective 6-DoF acceleration correction from six *completed* historical poses:
+
+$$
+\widehat{\mathbf a}_t = f_{\mathrm{GRU}}(\mathcal H_{t-1}).
+$$
+
+The gated acceleration corrects the constant-velocity prediction:
+
+$$
+\widehat T_t =
+\operatorname{Exp}\!\left(
+\frac{1}{2}\Delta t_t^2\,G(\widehat{\mathbf a}_t)
+\right)T_t^{\mathrm{CV}}.
+$$
+
+The gate `G` independently suppresses acceleration components that do not meet the configured linear and angular thresholds. This is a **camera-pose prior**, subsequently refined by native SLAM tracking.
+
+**Implementation:** `src/predictive4d/cv_acceleration.py`, `src/predictive4d/native_pose_compat.py`, `src/predictive4d/paper_native.py`.
+
+### GenFlow3D-guided Dynamic Motion Prediction
+
+The official GenFlow3D model uses multi-frame point clouds to forecast *point-level scene flow* (not directly Gaussian parameters). For a 3D point from the latest observed frame,
+
+$$
+\widehat{\mathbf X}_{i,t} =
+\mathbf X_{i,t-1} + \widehat{\mathbf V}_{i,t},
+$$
+
+where `V` is the predicted three-dimensional displacement over the target interval. A point-to-Gaussian correspondence adapter maps valid displacements onto **existing** native dynamic Gaussian centers:
+
+$$
+\boldsymbol{\mu}_{i,t} =
+\boldsymbol{\mu}_{i,t-1} + \Delta\boldsymbol{\mu}_{i,t}.
+$$
+
+Only correspondences passing dynamic probability, distance, motion magnitude, and temporal consistency checks are applied. Otherwise, the native Flow4DGS optical-flow-based propagation is used as fallback.
+
+**Implementation:** `src/predictive4d/paper_native.py`, `src/predictive4d/flow4dgs_native.py`, `src/predictive4d/official_bridge.py`.
+
+## 2. Implementation status
+
+| Component | Main files | Status |
+| --- | --- | --- |
+| CV + gated acceleration GRU | `src/predictive4d/cv_acceleration.py` | Implemented; loads trained `CVAccelerationGRU-v1` checkpoint |
+| Causal native inference | `src/predictive4d/paper_native.py` | Implemented; uses historical frames only |
+| Official GenFlow3D inference | `src/predictive4d/paper_native.py`, official external GenFlow3D checkout | Integrated; successful inference does not guarantee native Gaussian update |
+| Predicted Scene Flow → Gaussian center offsets | `src/predictive4d/flow4dgs_native.py`, `official_bridge.py` | Implemented with association, motion and keyframe-gap gates; native fallback retained |
+| Native Flow4DGS frontend/backend hooks | `scripts/patch_flow4dgs.py` | Guarded/idempotent source patcher for specific upstream source layout |
+| CUDA and Python compatibility | `scripts/patch_native_compat.py`, `scripts/prepare_genflow3d_imports.py` | Patches observed Colab compatibility issues |
+| SE(3) numeric compatibility | `src/predictive4d/native_pose_compat.py` | Small SO(3) drift can be projected; corrupted poses rejected |
+| Probabilistic three-hypothesis motion decomposition | `probabilistic.py`, `joint_ba.py` | Research/reference modules; full native mask-fusion claim not established |
+| Reliability Fusion Head | `fusion_head.py`, `train_fusion.py` | Optional reference experiment; not part of the reported native comparison |
+| Compact reference pipeline | `pipeline.py`, `network.py`, `torch_renderer.py` | For development and smoke tests; **not** the native CVPR SLAM backend |
+
+## 3. Repository structure
+
+```text
+configs/
+  joint.yaml                         # Compact reference pipeline
+  genflow_joint.yaml                 # Research configuration
+  flow4dgs_native_extra.yaml         # Example merge snippet, NOT complete Bonn YAML
+scripts/
+  setup_native_environment.py        # Coordinated source patches and CUDA checks
+  patch_flow4dgs.py                 # Native camera/cache/backend hooks
+  patch_native_compat.py            # CUDA/plotting compatibility fixes
+  prepare_genflow3d_imports.py      # Isolate upstream GenFlow3D imports
+  build_bonn_native_config.py       # Complete native Bonn config + actual timestamps
+  audit_native_run.py               # Count actual Gaussian updates and fallbacks
+src/predictive4d/
+  cv_acceleration.py                 # CVAccelerationGRU-v1 and causal SE(3) features
+  paper_native.py                    # Native CV+GRU + GenFlow3D predictor
+  native_pose_compat.py              # Guarded SE(3) correction
+  flow4dgs_native.py                # Native predicted camera/flow packet application
+  flow4dgs_online.py                # Alternative online prediction interface
+  official_bridge.py                # Packet schema and Gaussian matching
+  ...                               # Research and reference modules
+results/                              # Not tracked; external outputs in Google Drive
+tests/                                # Unit and patch-reproducibility tests
+```
+
+## 4. Local development (VS Code / Windows)
 
 ```powershell
-git clone https://github.com/ZexuZang/Predictive-Motion-aware-4D-Gaussian-SLAM.git
-
-cd Predictive-Motion-aware-4D-Gaussian-SLAM
-
+cd "D:\ESPACE\Foundation model\code\Predictive4D-Framework"
 python -m pip install -e ".[test]"
-
 python -m pytest -q
 ```
 
-Local development is intended for Python modules, configuration and unit testing.
+Windows is suitable for editing and testing Python logic. The **native** Flow4DGS rasterizer, PointNet2 and PyTorch3D GPU integration requires a compatible Linux/CUDA environment (for example, Google Colab). Do not run the compact `predictive4d run` command as a substitute for native SLAM evaluation.
 
-The native CUDA SLAM implementation requires a compatible Linux/CUDA environment.
+## 5. Native Colab/Linux setup
 
-### 4.2 Native SLAM Dependencies
-
-Clone the original repositories:
+The following reproduces the **code preparation workflow**. It is not a claim that every fresh Colab GPU environment will compile without dependencies, compatible toolchains or pretrained checkpoints.
 
 ```bash
+cd /content
+git clone https://github.com/ZexuZang/Predictive-Motion-aware-4D-Gaussian-SLAM.git
 git clone --recursive https://github.com/wangys16/Flow4DGS-SLAM.git
-
 git clone https://github.com/ustc-hlli/GenFlow3D.git
 ```
 
-The original experiment used:
-
-- NVIDIA Tesla T4.
-- Python 3.10.
-- PyTorch with CUDA support.
-- Native Gaussian rasterization.
-- PyTorch3D KNN.
-- GenFlow3D PointNet2 CUDA operations.
-
-Model checkpoints must be downloaded separately.
-
-### 4.3 Apply Native Compatibility Patches
-
-From the Predictive4D repository:
+Use the Python interpreter that contains native Torch/CUDA extensions (the original experiment used `/content/flow4dgs_env/bin/python`, Python 3.10):
 
 ```bash
+cd /content/Predictive-Motion-aware-4D-Gaussian-SLAM
 PY=/content/flow4dgs_env/bin/python
 
+# First inspect planned changes (does not modify upstream sources).
+$PY scripts/setup_native_environment.py \
+  --upstream /content/Flow4DGS-SLAM \
+  --genflow /content/GenFlow3D \
+  --python "$PY"
+
+# Apply only to a separate modified Flow4DGS checkout, never the pure baseline.
 $PY scripts/setup_native_environment.py \
   --upstream /content/Flow4DGS-SLAM \
   --genflow /content/GenFlow3D \
   --python "$PY" --apply
+
+$PY -m pip install --no-deps -e .
+$PY -m pytest -q tests/test_cv_acceleration.py \
+  tests/test_native_pose_compat.py tests/test_native_patch_repro.py
 ```
 
-This script installs the source-level compatibility changes and native integration hooks.
+If native CUDA extensions are not installed, `setup_native_environment.py` also supports `--build-cuda`. PyTorch3D may require `--pytorch3d-source <official-source-directory>`. Download and verify weights separately; the repository does not include checkpoint files.
 
-Use a separate Flow4DGS checkout for the original baseline to avoid modifying its tracking and mapping implementation.
+### Required external checkpoints
 
-## 5. Native SLAM Experiments
+- Official `GenFlow3D` checkpoint, e.g. `/content/GenFlow3D/pretrain/GenFlow3d_nuscenes.pth`
+- Trained `CVAccelerationGRU-v1` checkpoint, e.g. `/content/drive/MyDrive/Fast4D_SLAM/CameraHead_Pilot/cv_gated_acceleration_v1/cv_acceleration_gru_best.pt`
+- Original Flow4DGS RAFT and YOLOv9 segmentation weights
 
-The current native experiment supports two predictive camera modes:
+The GRU checkpoint must contain the expected architecture and training metadata; random initialization is not acceptable for evaluation.
 
-| Mode | Camera Prediction | Dynamic Motion |
-|---|---|---|
-| Original Flow4DGS | Native camera initialization | RAFT-based propagation |
-| CV + GenFlow3D | Constant Velocity | GenFlow3D with native fallback |
-| CV+GRU + GenFlow3D | Learned acceleration-corrected CV | GenFlow3D with native fallback |
+## 6. Bonn native CV+GRU + GenFlow3D experiment
 
-The experimental configuration can be generated using:
+Prepare the Bonn stride-3 RGB-D dataset in Google Drive. The config builder checks `rgb.txt`, `depth.txt`, `groundtruth.txt`, reads the official parser's frame ordering, and writes real processed-frame timestamps. It also provides `--mode cv` for a separate CV-only ablation.
 
-`scripts/build_bonn_native_config.py`
+```bash
+PY=/content/flow4dgs_env/bin/python
+ROOT=/content/Predictive-Motion-aware-4D-Gaussian-SLAM
 
-Supported camera options:
+$PY "$ROOT/scripts/build_bonn_native_config.py" \
+  --python "$PY" \
+  --upstream /content/Flow4DGS-SLAM \
+  --genflow /content/GenFlow3D \
+  --genflow-checkpoint /content/GenFlow3D/pretrain/GenFlow3d_nuscenes.pth \
+  --cv-gru-checkpoint /content/drive/MyDrive/Fast4D_SLAM/CameraHead_Pilot/cv_gated_acceleration_v1/cv_acceleration_gru_best.pt \
+  --joint-config "$ROOT/configs/genflow_joint.yaml" \
+  --data /content/drive/MyDrive/Datasets/Bonn/rgbd_bonn_person_tracking_stride3 \
+  --output /content/drive/MyDrive/Fast4D_SLAM/Native_Paper_SLAM_CVGRU \
+  --packet-dir /content/native_flow_packets_cv_gru \
+  --mode cv_gru \
+  --config-out /content/Flow4DGS-SLAM/configs/rgbd/bonn/bonn_native_cv_gru_genflow.yaml
 
-- `--mode cv`
-- `--mode cv_gru`
+cd /content/Flow4DGS-SLAM
+$PY -u slam.py \
+  --config configs/rgbd/bonn/bonn_native_cv_gru_genflow.yaml \
+  --eval --yolo 1 --save_results 1 --iters 50 \
+  --exp_name CVGRU_GenFlow3D_repro
+```
 
-The experiment uses a trained CVAccelerationGRU checkpoint and official GenFlow3D pretrained weights.
+**Important:** the original Flow4DGS baseline must run in a *separate, unmodified official checkout* with matching dataset, evaluation, renderer and mapping settings. The modified checkout initializes the first pose without GT; ensure a fair common initialization/evaluation convention before interpreting differences.
 
-For detailed native setup and commands, see [Native CV+GRU Colab Reproducibility](docs/NATIVE_CVGRU_COLAB_REPRODUCIBILITY.md).
+### Audit what GenFlow3D actually changed
 
-## 6. Experimental Results
+```bash
+PY=/content/flow4dgs_env/bin/python
+ROOT=/content/Predictive-Motion-aware-4D-Gaussian-SLAM
 
-### Dataset
+$PY "$ROOT/scripts/audit_native_run.py" \
+  --log /path/to/your/native_run.log \
+  --packet-dir /content/native_flow_packets_cv_gru \
+  --result-dir /path/to/your/native_result_directory \
+  --save-json /path/to/native_run_audit.json
+```
 
-**Bonn RGB-D Person Tracking — stride 3**
+This audit separates **network inference records** from **GenFlow3D Gaussian-offset applications** (`PREDICTIVE4D_GENFLOW_APPLIED`) and **RAFT fallback events** (`PREDICTIVE4D_NATIVE_FLOW_FALLBACK`). The paths above must be replaced by actual output paths.
 
-- Frames: 194
-- Camera trajectory evaluation: ATE and RPE
-- Reconstruction evaluation: PSNR, SSIM, LPIPS
-- Comparison: Original Flow4DGS-SLAM versus CV+GRU+GenFlow3D
+## 7. First experiment: Bonn Person Tracking (stride 3)
 
-### 6.1 Camera Trajectory Estimation
+The following numbers come from the previously completed **194-frame** experiment and common-frame offline evaluation; they have **not** been freshly reproduced from a clean checkout of this README.
 
-| Metric | Flow4DGS-SLAM | CV+GRU+GenFlow3D |
-|---|---:|---:|
-| ATE RMSE (m) ↓ | 0.189424 | **0.091552** |
-| RPE Translation (m) ↓ | 0.053590 | **0.043623** |
-| RPE Rotation (deg) ↓ | 3.738101 | **3.626036** |
+| Metric | Original Flow4DGS-SLAM | CV+GRU+GenFlow3D | Direction |
+| --- | ---: | ---: | :---: |
+| ATE RMSE, common-frame SE(3) alignment (m) | 0.189424 | **0.091552** | ↓ |
+| RPE translation RMSE, Δ=1 sampled frame (m) | 0.053590 | **0.043623** | ↓ |
+| RPE rotation RMSE, Δ=1 sampled frame (degrees) | 3.738101 | **3.626036** | ↓ |
+| PSNR, before refinement (dB) | 19.860777 | **21.241728** | ↑ |
+| SSIM, before refinement | 0.754707 | **0.811516** | ↑ |
+| LPIPS, before refinement | 0.421586 | **0.318278** | ↓ |
+| PSNR, after refinement (dB) | 24.228287 | **26.398473** | ↑ |
+| SSIM, after refinement | 0.810705 | **0.855004** | ↑ |
+| LPIPS, after refinement | 0.321322 | **0.237600** | ↓ |
 
-The proposed configuration reduces the common-frame, SE(3)-aligned ATE RMSE by approximately **51.7%** on this sequence.
+The common-frame aligned ATE decreased by approximately **51.7%** in this experiment. The native `plot/ATE_0.json` reports different values because of a different evaluation convention; do not mix these definitions. The RPE Δ=1 is measured between consecutive **stride-3 sampled** frames.
 
-### 6.2 Rendering Quality
+### Scientific limitations
 
-| Metric | Flow4DGS-SLAM | CV+GRU+GenFlow3D |
-|---|---:|---:|
-| PSNR Before (dB) ↑ | 19.8608 | **21.2417** |
-| SSIM Before ↑ | 0.7547 | **0.8115** |
-| LPIPS Before ↓ | 0.4216 | **0.3183** |
-| PSNR After (dB) ↑ | 24.2283 | **26.3985** |
-| SSIM After ↑ | 0.8107 | **0.8550** |
-| LPIPS After ↓ | 0.3213 | **0.2376** |
+- The Bonn stride-3 sequence was also involved in GRU development/training; this is **not an independent held-out evaluation**.
+- Historical audit of the completed run found **2 GenFlow3D Gaussian-offset application events and 38 RAFT fallback events**. Therefore the improvements **cannot yet be attributed solely to GenFlow3D**.
+- The dynamic mask in this run comes from **native RAFT/YOLO**, not the proposed independent GenFlow3D-guided probabilistic motion segmentation or optional Pre-Ours fusion.
+- Predicted flow variance in current packet generation is a **proxy**, not a calibrated uncertainty estimate.
+- The reference Schur/probabilistic modules and camera-fusion experiments are not evidence that the complete proposed joint probabilistic SLAM operates in the native experiment.
+- Report the upstream commit IDs, initialization conventions, flow update acceptance statistics and hardware/software environment for reproducibility.
 
-These results are from the completed 194-frame experiment. They have not yet been independently reproduced using a fresh checkout of the latest consolidated code.
+## 8. Next experiments
 
-### 6.3 Experimental Limitations
+1. Run independent **CV-only**, **CV+GRU**, **native Flow4DGS** and **GenFlow enabled/disabled** ablations with matched settings.
+2. Diagnose low GenFlow3D offset acceptance (point-to-Gaussian correspondence, scene-flow units, dynamic prior, keyframe gap and motion thresholds).
+3. Evaluate on held-out sequences with true per-frame timing and trained model checkpoints not fitted to the evaluation sequence.
+4. Develop and evaluate a **GenFlow3D motion-consistency dynamic mask** independently of the optional Pre-Ours mask; measure IoU, precision/recall and temporal consistency before claiming mask fusion improvements.
+5. Evaluate ATE/RPE, EPE3D, PSNR/SSIM/LPIPS, dynamic reconstruction consistency and runtime/FPS with repeatable configuration snapshots.
 
-The historical audit recorded:
+## 9. Documentation and references
 
-- 2 successful GenFlow3D dynamic Gaussian offset applications.
-- 38 native RAFT fallback events.
+- [Native Colab reproducibility guide](docs/NATIVE_CVGRU_COLAB_REPRODUCIBILITY.md)
+- [Architecture and implementation-status contract](docs/FINAL_NOTION_ALIGNMENT.md)
+- [Experimental camera fusion](docs/FUSION_HEAD_IMPLEMENTATION_CN.md)
+- [Flow4DGS-SLAM official implementation](https://github.com/wangys16/Flow4DGS-SLAM)
+- [GenFlow3D official implementation](https://github.com/ustc-hlli/GenFlow3D)
 
-Therefore, the improvements cannot currently be attributed solely to GenFlow3D.
-
-Furthermore, the Bonn stride-3 sequence was involved in CV+GRU development/training, so this comparison is not an independent held-out evaluation.
-
-The current results are preliminary and require additional ablation studies and evaluation sequences.
-
-## 7. Additional Research Modules
-
-The repository also contains experimental modules for:
-
-**Probabilistic Motion Decomposition**
-
-`probabilistic.py`
-
-Models static, dynamic and outlier hypotheses using geometric residuals and uncertainty proxies.
-
-**Joint Camera–Motion Optimization**
-
-`joint_ba.py`
-
-Provides a local SE(3) optimization approach using a Schur-complement formulation.
-
-**Adaptive Gaussian Motion**
-
-`gaussians.py`
-
-Explores local motion propagation for Gaussian geometry.
-
-**Learned Reliability Fusion**
-
-`fusion_head.py` and `train_fusion.py`
-
-Investigate learned fusion between camera pose candidates.
-
-These are research/reference modules and should not be interpreted as fully validated components of the completed native experiment.
-
-## 8. Future Work
-
-1. Increase GenFlow3D motion-update acceptance and reduce dependence on native RAFT fallback.
-2. Evaluate CV-only, CV+GRU-only and GenFlow3D-enabled configurations independently.
-3. Develop GenFlow3D-guided probabilistic dynamic mask generation.
-4. Integrate optional external dynamic-mask priors with confidence-aware fusion.
-5. Improve predicted point-motion to Gaussian-motion correspondence.
-6. Test on independent RGB-D sequences with stronger dynamic motion.
-7. Evaluate full SLAM accuracy, rendering quality, dynamic reconstruction and computational efficiency.
-
-## 9. References
-
-- [Flow4DGS-SLAM — Official GitHub Repository](https://github.com/wangys16/Flow4DGS-SLAM)
-- [GenFlow3D — Official GitHub Repository](https://github.com/ustc-hlli/GenFlow3D)
-- [Native Colab Reproducibility Guide](docs/NATIVE_CVGRU_COLAB_REPRODUCIBILITY.md)
-- [Architecture and Implementation Status](docs/FINAL_NOTION_ALIGNMENT.md)
-
----
-
-**Project repository:** [Predictive-Motion-aware-4D-Gaussian-SLAM](https://github.com/ZexuZang/Predictive-Motion-aware-4D-Gaussian-SLAM)
-
-**Research status:** Native 4D Gaussian SLAM integration and preliminary experimental evaluation completed; comprehensive ablations and held-out validation remain ongoing.
+**Repository:** [ZexuZang/Predictive-Motion-aware-4D-Gaussian-SLAM](https://github.com/ZexuZang/Predictive-Motion-aware-4D-Gaussian-SLAM)
